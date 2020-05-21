@@ -1,3 +1,4 @@
+#include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -5,17 +6,20 @@
 #include <linux/types.h>
 #include <linux/netfilter.h>		/* for NF_ACCEPT */
 #include <errno.h>
-#include <stdbool.h>               // for boolean
 #include <stdint.h>
 #include <netinet/in.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
 #include "sys/types.h"
-#include "regex.h"
+#include <regex>
 #include <string.h>
+#include <string>
 /* returns packet id */
 
-regex_t state;
+using namespace std;
 
+int host_len;
+char *host;
+regex pattern("\x48\x6f\x73\x74\x3a\x20(.*)"); // "Host: "
 typedef struct _type_ip{
     uint8_t h_len:4;
     uint8_t ver:4;
@@ -102,7 +106,7 @@ static u_int32_t print_pkt (struct nfq_data *tb)
     ret = nfq_get_payload(tb, &data); //*** 패킷의 시작 위치가 data , ret는 패킷 길이
     if (ret >= 0){
         printf("payload_len=%d ", ret);
-//        dump(data,ret);
+        //        dump(data,ret);
     }
 
     fputc('\n', stdout);
@@ -110,24 +114,24 @@ static u_int32_t print_pkt (struct nfq_data *tb)
     return id;
 }
 bool is_warning(struct nfq_data *tb){
-    int len;
-    unsigned char *data;
-    len = nfq_get_payload(tb, &data);
-    if (len == 0)
+    u_char *data;
+    int length = nfq_get_payload(tb, &data);
+    if (length == 0)
         return false;
-    type_ip *iph = (type_ip *)data;
+    type_ip *iph = reinterpret_cast<type_ip *>(const_cast<u_char *>(data));
     if (iph->proto != IPPROTO_TCP)
         return false;
-    type_tcp *tcph = (type_tcp *)(data+(iph->h_len*4));
+    type_tcp *tcph = reinterpret_cast<type_tcp *>(const_cast<u_char *>((data+(iph->h_len*4))));
     if (ntohs(tcph->dst_port) != 80)
         return false;
     data = data + iph->h_len*4 + tcph->h_len*4;
-    regmatch_t tmp[1];
-    int status = regexec(&state, data, 1, tmp, 0);
-    if (status == 0){
-        int str_len = tmp->rm_eo - tmp->rm_so - 7;
-        printf("\nURL : %.*s\n", str_len, &data[tmp->rm_so+6]);         // printf url
-        if (0 == memcmp(&data[tmp->rm_so+6],"test.gilgil.net",str_len)){
+    smatch tmp;
+    string str(reinterpret_cast<char *>(const_cast<u_char *>(data)));
+    if (regex_search(str,tmp,pattern)){
+        if(tmp[1].length() != host_len)
+            return false;
+        cout << tmp[1].str() << endl;
+        if (0 == tmp[1].str().compare(host)){
             printf("success drop the packet\n");
             return true;
         }
@@ -139,27 +143,33 @@ bool is_warning(struct nfq_data *tb){
 static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
               struct nfq_data *nfa, void *data)
 {
+    (void)data;
     u_int32_t id = print_pkt(nfa);
     printf("entering callback\n");
     if (is_warning(nfa))
-        return nfq_set_verdict(qh, id, NF_DROP, 0, NULL); //******
-    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        return nfq_set_verdict(qh, id, NF_DROP, 0, nullptr); //******
+    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 }
 
-int main(int argc, char **argv)
+void usage(){
+    printf("usage : netfilter-test <host>\n");
+    printf("sample : netfilter-test test.gilgil.net\n");
+}
+
+int main(int argc, char *argv[])
 {
+    if (argc != 2){
+        usage();
+        return -1;
+    }
+    host_len = strlen(argv[1]);
+    host = argv[1];
     struct nfq_handle *h;
     struct nfq_q_handle *qh;
-    struct nfnl_handle *nh;
+//    struct nfnl_handle *nh;
     int fd;
     int rv;
     char buf[4096] __attribute__ ((aligned));
-    int r;
-    char * pattern = "Host: .*$";
-    if (0 != (r = regcomp(&state, pattern, REG_NEWLINE))) {
-          printf("regcomp() failed, returning nonzero (%d)\n", r);
-          exit(EXIT_FAILURE);
-       }
     printf("opening library handle\n");
     h = nfq_open();
     if (!h) {
@@ -180,7 +190,7 @@ int main(int argc, char **argv)
     }
 
     printf("binding this socket to queue '0'\n");
-    qh = nfq_create_queue(h,  0, &cb, NULL); // **********
+    qh = nfq_create_queue(h,  0, &cb, nullptr); // **********
     if (!qh) {
         fprintf(stderr, "error during nfq_create_queue()\n");
         exit(1);
